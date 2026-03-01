@@ -11,6 +11,8 @@
 typedef lisa_value (*lisa_jit_fn)(lisa_vm *vm, lisa_obj_closure *closure,
                                   lisa_value *slots);
 
+static lisa_value jit_trampoline(lisa_vm *vm, lisa_value result);
+
 /* --- Stack operations --- */
 
 static void push(lisa_vm *vm, lisa_value value) {
@@ -191,9 +193,9 @@ static bool call_closure(lisa_vm *vm, lisa_obj_closure *closure, int argc) {
         runtime_error(vm, "Stack overflow.");
         return false;
     }
-    /* JIT compile on first call (skip top-level scripts) */
+    /* JIT compile on first call (skip top-level script) */
     if (vm->jit_enabled && !closure->function->jit_code &&
-        closure->function->name != NULL) {
+        vm->frame_count > 0) {
         lisa_jit_compile(vm, closure->function);
     }
     lisa_call_frame *frame = &vm->frames[vm->frame_count++];
@@ -473,6 +475,8 @@ lisa_interpret_result lisa_run(lisa_vm *vm, int base_frame) {
             if (frame->closure->function->jit_code) {
                 lisa_jit_fn jit_fn = (lisa_jit_fn)frame->closure->function->jit_code;
                 lisa_value result = jit_fn(vm, frame->closure, frame->slots);
+                if (IS_TAIL_PENDING(result))
+                    result = jit_trampoline(vm, result);
                 /* JIT function returned; pop its frame */
                 close_upvalues(vm, frame->slots);
                 vm->frame_count--;
@@ -523,6 +527,8 @@ lisa_interpret_result lisa_run(lisa_vm *vm, int base_frame) {
             if (closure->function->jit_code) {
                 lisa_jit_fn jit_fn = (lisa_jit_fn)closure->function->jit_code;
                 lisa_value result = jit_fn(vm, frame->closure, frame->slots);
+                if (IS_TAIL_PENDING(result))
+                    result = jit_trampoline(vm, result);
                 close_upvalues(vm, frame->slots);
                 vm->frame_count--;
                 if (vm->frame_count == base_frame) {
@@ -711,6 +717,61 @@ static void sync_gc_roots(lisa_vm *vm) {
     vm->gc.open_upvalues = vm->open_upvalues;
 }
 
+/* Handle pending JIT tail calls iteratively (trampoline).
+   Called when a JIT function returns LISA_TAIL_PENDING(argc). */
+static lisa_value jit_trampoline(lisa_vm *vm, lisa_value result) {
+    while (IS_TAIL_PENDING(result)) {
+        int argc = TAIL_PENDING_ARGC(result);
+        lisa_value callee = vm->stack_top[-1 - argc];
+
+        if (IS_OBJ(callee) && OBJ_TYPE(callee) == OBJ_NATIVE) {
+            call_value(vm, callee, argc);
+            return vm->stack_top[-1];
+        }
+
+        if (!IS_OBJ(callee) || OBJ_TYPE(callee) != OBJ_CLOSURE) {
+            runtime_error(vm, "Can only call functions and closures.");
+            return LISA_NIL;
+        }
+
+        lisa_obj_closure *closure = AS_CLOSURE(callee);
+        if (argc != closure->function->arity) {
+            runtime_error(vm, "Expected %d arguments but got %d.",
+                          closure->function->arity, argc);
+            return LISA_NIL;
+        }
+
+        /* Reuse the current top frame */
+        lisa_call_frame *frame = &vm->frames[vm->frame_count - 1];
+        close_upvalues(vm, frame->slots);
+
+        lisa_value *src = vm->stack_top - argc - 1;
+        memmove(frame->slots, src, (size_t)(argc + 1) * sizeof(lisa_value));
+        vm->stack_top = frame->slots + argc + 1;
+
+        frame->closure = closure;
+        frame->ip = closure->function->chunk.code;
+
+        /* JIT-compile the target if needed */
+        if (!closure->function->jit_code && vm->jit_enabled) {
+            lisa_jit_compile(vm, closure->function);
+        }
+
+        if (closure->function->jit_code) {
+            lisa_jit_fn jit_fn = (lisa_jit_fn)closure->function->jit_code;
+            result = jit_fn(vm, frame->closure, frame->slots);
+            /* If result is TAIL_PENDING, loop continues */
+        } else {
+            /* JIT compilation failed; use interpreter (no trampoline risk
+               since this function can't produce TAIL_PENDING) */
+            int target_depth = vm->frame_count - 1;
+            lisa_run(vm, target_depth);
+            return vm->stack_top[-1];
+        }
+    }
+    return result;
+}
+
 lisa_value lisa_jit_call_helper(lisa_vm *vm, int argc) {
     lisa_value callee = vm->stack_top[-1 - argc];
     if (!call_value(vm, callee, argc)) {
@@ -726,6 +787,8 @@ lisa_value lisa_jit_call_helper(lisa_vm *vm, int argc) {
     if (frame->closure->function->jit_code) {
         lisa_jit_fn jit_fn = (lisa_jit_fn)frame->closure->function->jit_code;
         result = jit_fn(vm, frame->closure, frame->slots);
+        if (IS_TAIL_PENDING(result))
+            result = jit_trampoline(vm, result);
     } else {
         int target_depth = vm->frame_count - 1;
         lisa_run(vm, target_depth);
@@ -739,51 +802,6 @@ lisa_value lisa_jit_call_helper(lisa_vm *vm, int argc) {
     return result;
 }
 
-lisa_value lisa_jit_tail_call_helper(lisa_vm *vm, int argc) {
-    lisa_value callee = vm->stack_top[-1 - argc];
-
-    /* Native functions: just call directly */
-    if (IS_OBJ(callee) && OBJ_TYPE(callee) == OBJ_NATIVE) {
-        call_value(vm, callee, argc);
-        return vm->stack_top[-1];
-    }
-
-    if (!IS_OBJ(callee) || OBJ_TYPE(callee) != OBJ_CLOSURE) {
-        runtime_error(vm, "Can only call functions and closures.");
-        return LISA_NIL;
-    }
-
-    lisa_obj_closure *closure = AS_CLOSURE(callee);
-    if (argc != closure->function->arity) {
-        runtime_error(vm, "Expected %d arguments but got %d.",
-                      closure->function->arity, argc);
-        return LISA_NIL;
-    }
-
-    /* The JIT caller's frame is the current top frame; reuse it */
-    lisa_call_frame *frame = &vm->frames[vm->frame_count - 1];
-    close_upvalues(vm, frame->slots);
-
-    /* Slide callee + args down over the current frame */
-    lisa_value *src = vm->stack_top - argc - 1;
-    memmove(frame->slots, src, (size_t)(argc + 1) * sizeof(lisa_value));
-    vm->stack_top = frame->slots + argc + 1;
-
-    frame->closure = closure;
-    frame->ip = closure->function->chunk.code;
-
-    /* Dispatch to JIT or interpreter */
-    lisa_value result;
-    if (closure->function->jit_code) {
-        lisa_jit_fn jit_fn = (lisa_jit_fn)closure->function->jit_code;
-        result = jit_fn(vm, frame->closure, frame->slots);
-    } else {
-        int target_depth = vm->frame_count - 1;
-        lisa_run(vm, target_depth);
-        result = vm->stack_top[-1];
-    }
-    return result;
-}
 
 lisa_value lisa_jit_get_global(lisa_vm *vm, int name_idx) {
     lisa_call_frame *frame = &vm->frames[vm->frame_count - 1];

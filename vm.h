@@ -48,9 +48,15 @@ lisa_interpret_result lisa_interpret(lisa_vm *vm, const char *source);
    Stops when frame_count drops to base_frame. */
 lisa_interpret_result lisa_run(lisa_vm *vm, int base_frame);
 
+/* JIT trampoline sentinel: top 16 bits = 0xDEAD (invalid as any lisa_value tag),
+   low 8 bits = argc for the pending tail call. */
+#define LISA_TAIL_PENDING_BASE ((uint64_t)0xDEAD000000000000)
+#define LISA_TAIL_PENDING(argc) (LISA_TAIL_PENDING_BASE | (uint64_t)(argc))
+#define IS_TAIL_PENDING(v) (((v) >> 48) == 0xDEAD)
+#define TAIL_PENDING_ARGC(v) ((int)((v) & 0xFF))
+
 /* Helpers called by JIT-compiled code */
 lisa_value lisa_jit_call_helper(lisa_vm *vm, int argc);
-lisa_value lisa_jit_tail_call_helper(lisa_vm *vm, int argc);
 lisa_value lisa_jit_get_global(lisa_vm *vm, int name_idx);
 void lisa_jit_def_global(lisa_vm *vm, int name_idx, lisa_value value);
 lisa_value lisa_jit_get_upvalue(lisa_obj_closure *closure, int idx);
