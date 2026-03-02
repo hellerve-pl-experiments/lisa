@@ -10,6 +10,7 @@
 #include "ctx.h"
 #include "op.h"
 #include "register.h"
+#include "builder.h"
 #pragma GCC diagnostic pop
 
 #include <assert.h>
@@ -214,80 +215,33 @@ static void emit_reload_stack_top(cj_ctx *ctx) {
 
 /* Logical shift right: dst = src >> shift (zero-extend) */
 static void emit_lsr_imm(cj_ctx *ctx, const char *dst, const char *src, int shift) {
-#if defined(__x86_64__) || defined(_M_X64)
     if (strcmp(dst, src) != 0)
         cj_mov(ctx, reg(dst), reg(src));
-    cj_shr(ctx, reg(dst), imm((uint64_t)shift));
-#elif defined(__aarch64__) || defined(_M_ARM64)
-    /* UBFM Xd, Xn, #shift, #63 */
-    int rd = arm64_parse_reg(dst);
-    int rn = arm64_parse_reg(src);
-    uint32_t instr = 0xD340FC00
-        | ((uint32_t)(shift & 0x3f) << 16)
-        | ((uint32_t)(rn & 0x1f) << 5)
-        | (uint32_t)(rd & 0x1f);
-    cj_add_u32(ctx, instr);
-#endif
+    cj_builder_shr(ctx, reg(dst), shift);
 }
 
 /* Logical shift left: dst = src << shift */
 static void emit_lsl_imm(cj_ctx *ctx, const char *dst, const char *src, int shift) {
-#if defined(__x86_64__) || defined(_M_X64)
     if (strcmp(dst, src) != 0)
         cj_mov(ctx, reg(dst), reg(src));
-    cj_shl(ctx, reg(dst), imm((uint64_t)shift));
-#elif defined(__aarch64__) || defined(_M_ARM64)
-    /* UBFM Xd, Xn, #(-shift mod 64), #(63-shift) */
-    int rd = arm64_parse_reg(dst);
-    int rn = arm64_parse_reg(src);
-    int immr = (-shift) & 63;
-    int imms = 63 - shift;
-    uint32_t instr = 0xD3400000
-        | ((uint32_t)(immr & 0x3f) << 16)
-        | ((uint32_t)(imms & 0x3f) << 10)
-        | ((uint32_t)(rn & 0x1f) << 5)
-        | (uint32_t)(rd & 0x1f);
-    cj_add_u32(ctx, instr);
-#endif
+    cj_builder_shl(ctx, reg(dst), shift);
 }
 
 /* Clear top 16 bits: r &= 0x0000FFFFFFFFFFFF (unsigned 48-bit payload) */
 static void emit_mask48(cj_ctx *ctx, const char *r) {
-#if defined(__x86_64__) || defined(_M_X64)
-    cj_shl(ctx, reg(r), imm(16));
-    cj_shr(ctx, reg(r), imm(16));
-#elif defined(__aarch64__) || defined(_M_ARM64)
-    /* UBFM Xd, Xd, #0, #47 = extract bits 47:0, zero-extend */
-    int rd = arm64_parse_reg(r);
-    uint32_t instr = 0xD340BC00
-        | ((uint32_t)(rd & 0x1f) << 5)
-        | (uint32_t)(rd & 0x1f);
-    cj_add_u32(ctx, instr);
-#endif
+    cj_builder_shl(ctx, reg(r), 16);
+    cj_builder_shr(ctx, reg(r), 16);
 }
 
 /* Sign-extend from bit 47: r = sign_extend_48(r) */
 static void emit_sign_extend48(cj_ctx *ctx, const char *r) {
-#if defined(__x86_64__) || defined(_M_X64)
-    cj_shl(ctx, reg(r), imm(16));
-    cj_sar(ctx, reg(r), imm(16));
-#elif defined(__aarch64__) || defined(_M_ARM64)
-    /* SBFM Xd, Xd, #0, #47 */
-    int rd = arm64_parse_reg(r);
-    uint32_t instr = 0x9340BC00
-        | ((uint32_t)(rd & 0x1f) << 5)
-        | (uint32_t)(rd & 0x1f);
-    cj_add_u32(ctx, instr);
-#endif
+    cj_builder_shl(ctx, reg(r), 16);
+    cj_builder_sar(ctx, reg(r), 16);
 }
 
 /* OR dst |= src */
 static void emit_or(cj_ctx *ctx, const char *dst, const char *src) {
-#if defined(__x86_64__) || defined(_M_X64)
-    cj_or(ctx, reg(dst), reg(src));
-#elif defined(__aarch64__) || defined(_M_ARM64)
-    cj_orr(ctx, reg(dst), reg(src));
-#endif
+    cj_builder_or(ctx, reg(dst), reg(src));
 }
 
 /* Re-tag a masked 48-bit payload as an integer. Uses REG_TMP1 as scratch. */
@@ -296,27 +250,7 @@ static void emit_retag_int(cj_ctx *ctx, const char *r) {
     emit_or(ctx, r, REG_TMP1);
 }
 
-/* ===== ARM64 CSET Helper ===== */
-
-#if defined(__aarch64__) || defined(_M_ARM64)
-/* CSINC Xd, XZR, XZR, invert_cond → Xd = (cond) ? 1 : 0 */
-#define ARM64_COND_EQ 0x0
-#define ARM64_COND_NE 0x1
-#define ARM64_COND_LO 0x3
-#define ARM64_COND_GE 0xA
-#define ARM64_COND_LT 0xB
-#define ARM64_COND_GT 0xC
-#define ARM64_COND_LE 0xD
-
-static void emit_cset(cj_ctx *ctx, const char *dst, int invert_cond) {
-    int rd = arm64_parse_reg(dst);
-    /* CSINC Xd, XZR, XZR, cond: 1 00 11010100 11111 cond 01 11111 Rd */
-    uint32_t instr = 0x9A9F07E0
-        | ((uint32_t)(invert_cond & 0xf) << 12)
-        | (uint32_t)(rd & 0x1f);
-    cj_add_u32(ctx, instr);
-}
-#endif
+/* ARM64 CSET defines removed — now using cj_builder_cset from builder.h */
 
 /* ===== Register Cache ===== */
 
@@ -477,33 +411,21 @@ static void emit_non_double_check(cj_ctx *ctx, const char *val_reg, cj_label fai
 typedef enum { CMP_LT, CMP_LE, CMP_GT, CMP_GE, CMP_EQ, CMP_NE } cmp_kind;
 
 static void emit_bool_from_flags(cj_ctx *ctx, cmp_kind kind) {
-#if defined(__x86_64__) || defined(_M_X64)
-    /* MOV doesn't affect flags, so we can load LISA_FALSE first */
-    emit_load_imm64(ctx, REG_TMP1, LISA_FALSE);
+    /* Map cmp_kind to cj_condition */
+    cj_condition cond;
     switch (kind) {
-    case CMP_LT: cj_setl(ctx, reg("al")); break;
-    case CMP_LE: cj_setle(ctx, reg("al")); break;
-    case CMP_GT: cj_setg(ctx, reg("al")); break;
-    case CMP_GE: cj_setge(ctx, reg("al")); break;
-    case CMP_EQ: cj_setz(ctx, reg("al")); break;
-    case CMP_NE: cj_setnz(ctx, reg("al")); break;
+    case CMP_LT: cond = CJ_COND_L;  break;
+    case CMP_LE: cond = CJ_COND_LE; break;
+    case CMP_GT: cond = CJ_COND_G;  break;
+    case CMP_GE: cond = CJ_COND_GE; break;
+    case CMP_EQ: cond = CJ_COND_Z;  break;
+    case CMP_NE: cond = CJ_COND_NZ; break;
     }
-    /* rax = LISA_FALSE | 0/1 = LISA_FALSE or LISA_TRUE */
-#elif defined(__aarch64__) || defined(_M_ARM64)
-    /* CSET first (reads flags), then load constant (doesn't affect flags) */
-    int invert;
-    switch (kind) {
-    case CMP_LT: invert = ARM64_COND_GE; break;
-    case CMP_LE: invert = ARM64_COND_GT; break;
-    case CMP_GT: invert = ARM64_COND_LE; break;
-    case CMP_GE: invert = ARM64_COND_LT; break;
-    case CMP_EQ: invert = ARM64_COND_NE; break;
-    case CMP_NE: invert = ARM64_COND_EQ; break;
-    }
-    emit_cset(ctx, REG_TMP1, invert); /* TMP1 = 0 or 1 */
+    /* CSET: TMP1 = 0 or 1 from flags (reads flags, then MOVZX/CSINC) */
+    cj_builder_cset(ctx, reg(REG_TMP1), cond);
+    /* OR with LISA_FALSE to produce LISA_FALSE or LISA_TRUE */
     emit_load_imm64(ctx, REG_TMP2, LISA_FALSE);
-    emit_or(ctx, REG_TMP1, REG_TMP2); /* TMP1 = LISA_FALSE | 0/1 */
-#endif
+    emit_or(ctx, REG_TMP1, REG_TMP2);
 }
 
 /* ===== Call Helpers (flush-aware) ===== */
@@ -525,11 +447,7 @@ static void emit_arith_compute(cj_ctx *ctx, const char *dst, const char *src, ar
     case ARITH_ADD: cj_add(ctx, reg(dst), reg(src)); break;
     case ARITH_SUB: cj_sub(ctx, reg(dst), reg(src)); break;
     case ARITH_MUL:
-#if defined(__x86_64__) || defined(_M_X64)
-        cj_imul(ctx, reg(dst), reg(src));
-#elif defined(__aarch64__) || defined(_M_ARM64)
-        cj_mul(ctx, reg(dst), reg(src));
-#endif
+        cj_builder_mul(ctx, reg(dst), reg(src));
         break;
     }
 }
@@ -978,11 +896,7 @@ bool lisa_jit_compile(lisa_vm *vm, lisa_obj_function *fn) {
 
                 /* Extract signed payload, negate, mask, retag */
                 emit_sign_extend48(ctx, a_reg);
-#if defined(__x86_64__) || defined(_M_X64)
-                cj_neg(ctx, reg(a_reg));
-#elif defined(__aarch64__) || defined(_M_ARM64)
-                cj_neg(ctx, reg(a_reg), reg(a_reg));
-#endif
+                cj_builder_neg(ctx, reg(a_reg));
                 emit_mask48(ctx, a_reg);
                 emit_retag_int(ctx, a_reg);
 
