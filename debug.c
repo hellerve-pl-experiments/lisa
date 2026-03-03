@@ -101,7 +101,8 @@ int lisa_disassemble_instruction(lisa_chunk *chunk, int offset) {
     case OP_CALL:          return byte_instruction("OP_CALL", chunk, offset);
     case OP_TAIL_CALL:     return byte_instruction("OP_TAIL_CALL", chunk, offset);
     case OP_RETURN:        return simple_instruction("OP_RETURN", offset);
-    case OP_CLOSE_UPVALUE: return simple_instruction("OP_CLOSE_UPVALUE", offset);
+    case OP_CLOSE_UPVALUE:    return simple_instruction("OP_CLOSE_UPVALUE", offset);
+    case OP_CLOSE_UPVALUES_AT: return byte_instruction("OP_CLOSE_UPVALUES_AT", chunk, offset);
 
     case OP_CONS:          return simple_instruction("OP_CONS", offset);
     case OP_CAR:           return simple_instruction("OP_CAR", offset);

@@ -670,6 +670,7 @@ static void scan_branch_targets(lisa_chunk *chunk, label_map *map, cj_ctx *ctx) 
         case OP_GET_GLOBAL: case OP_DEF_GLOBAL:
         case OP_CALL: case OP_TAIL_CALL:
         case OP_LIST: case OP_PRINTLN:
+        case OP_CLOSE_UPVALUES_AT:
             i += 2;
             break;
         default:
@@ -763,6 +764,10 @@ bool lisa_jit_compile(lisa_vm *vm, lisa_obj_function *fn) {
 
         case OP_GET_LOCAL: {
             uint8_t slot = chunk->code[i + 1];
+            /* Flush cached values to memory first so that locals
+             * created by let/def (pushed via OP_CONSTANT) are visible
+             * at their slot positions in the frame. */
+            cache_flush(ctx, &cache);
             emit_load64(ctx, REG_TMP1, REG_SLOTS, (int32_t)(slot * 8));
             cache_push(ctx, &cache, REG_TMP1);
             i += 2;
@@ -771,13 +776,11 @@ bool lisa_jit_compile(lisa_vm *vm, lisa_obj_function *fn) {
 
         case OP_SET_LOCAL: {
             uint8_t slot = chunk->code[i + 1];
-            if (cache.depth > 0) {
-                emit_store64(ctx, cache.regs[cache.depth - 1],
-                             REG_SLOTS, (int32_t)(slot * 8));
-            } else {
-                emit_peek(ctx, REG_TMP1, 0);
-                emit_store64(ctx, REG_TMP1, REG_SLOTS, (int32_t)(slot * 8));
-            }
+            /* Flush first so stale cached values don't later overwrite
+             * the slot when the cache is flushed by a subsequent op. */
+            cache_flush(ctx, &cache);
+            emit_peek(ctx, REG_TMP1, 0);
+            emit_store64(ctx, REG_TMP1, REG_SLOTS, (int32_t)(slot * 8));
             i += 2;
             break;
         }
@@ -1124,6 +1127,21 @@ bool lisa_jit_compile(lisa_vm *vm, lisa_obj_function *fn) {
             emit_call_abs(ctx, (void *)lisa_jit_close_upvalue);
             emit_reload_stack_top(ctx);
             i += 1;
+            break;
+        }
+
+        case OP_CLOSE_UPVALUES_AT: {
+            uint8_t slot = chunk->code[i + 1];
+            cache_flush(ctx, &cache);
+            emit_sync_stack_top(ctx);
+            /* Compute &frame->slots[slot] */
+            cj_mov(ctx, reg(REG_ARG1), reg(REG_SLOTS));
+            if (slot > 0)
+                cj_add(ctx, reg(REG_ARG1), imm((uint64_t)slot * 8));
+            cj_mov(ctx, reg(REG_ARG0), reg(REG_VM));
+            emit_call_abs(ctx, (void *)lisa_jit_close_upvalue);
+            emit_reload_stack_top(ctx);
+            i += 2;
             break;
         }
 

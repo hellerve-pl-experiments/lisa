@@ -178,12 +178,29 @@ static void compile_symbol(lisa_compiler *c, lisa_ast *node) {
 static void compile_def(lisa_compiler *c, lisa_ast *node) {
     const char *name = node->as.def.name->as.symbol.start;
     int length = node->as.def.name->as.symbol.length;
-    uint8_t global = identifier_constant(c, name, length);
 
-    compile_expr(c, node->as.def.value, false);
-    emit_bytes(c, OP_DEF_GLOBAL, global, node->line);
-    /* def is an expression that produces nil */
-    emit_byte(c, OP_NIL, node->line);
+    if (c->type == TYPE_FUNCTION) {
+        /* Inside a function: create a local variable.
+         * Reserve the slot with nil first, then register the local so
+         * self-referencing closures can resolve the name via upvalue.
+         * After compiling the initializer, SET_LOCAL writes the real
+         * value into the slot. */
+        emit_byte(c, OP_NIL, node->line);
+        add_local(c, name, length, node->line);
+        int slot = c->local_count - 1;
+        compile_expr(c, node->as.def.value, false);
+        emit_bytes(c, OP_SET_LOCAL, (uint8_t)slot, node->line);
+        emit_byte(c, OP_POP, node->line);
+        /* def is an expression that produces nil */
+        emit_byte(c, OP_NIL, node->line);
+    } else {
+        /* Top-level: create a global */
+        compile_expr(c, node->as.def.value, false);
+        uint8_t global = identifier_constant(c, name, length);
+        emit_bytes(c, OP_DEF_GLOBAL, global, node->line);
+        /* def is an expression that produces nil */
+        emit_byte(c, OP_NIL, node->line);
+    }
 }
 
 /* Check if a symbol AST matches a given string */
@@ -369,6 +386,47 @@ static void compile_fn(lisa_compiler *c, lisa_ast *node) {
     }
 }
 
+/* Clean up locals in the current scope, preserving the top-of-stack result.
+ * Stack before: [..., local0, local1, ..., localN-1, result]
+ * Stack after:  [..., result]
+ * Used by compile_let and compile_do. */
+static void end_scope_with_result(lisa_compiler *c, int line) {
+    int local_count_before = c->local_count;
+    c->scope_depth--;
+    while (c->local_count > 0 &&
+           c->locals[c->local_count - 1].depth > c->scope_depth) {
+        c->local_count--;
+    }
+    int locals_to_pop = local_count_before - c->local_count;
+    int first_slot = c->local_count;
+
+    /* Restore state so we can emit from the right local indices */
+    c->scope_depth++;
+    c->local_count = local_count_before;
+
+    if (locals_to_pop > 0) {
+        /* Close all captured upvalues BEFORE SET_LOCAL, so their values
+         * are saved to the heap while the slots still hold the originals. */
+        bool has_captures = false;
+        for (int i = first_slot; i < c->local_count; i++) {
+            if (c->locals[i].is_captured) { has_captures = true; break; }
+        }
+        if (has_captures) {
+            emit_bytes(c, OP_CLOSE_UPVALUES_AT, (uint8_t)first_slot, line);
+        }
+
+        emit_bytes(c, OP_SET_LOCAL, (uint8_t)first_slot, line);
+
+        /* All upvalues already closed; just pop the stack slots. */
+        for (int i = c->local_count - 1; i >= first_slot; i--) {
+            emit_byte(c, OP_POP, line);
+        }
+    }
+
+    c->scope_depth--;
+    c->local_count = first_slot;
+}
+
 static void compile_let(lisa_compiler *c, lisa_ast *node) {
     int line = node->line;
     begin_scope(c);
@@ -389,39 +447,7 @@ static void compile_let(lisa_compiler *c, lisa_ast *node) {
         }
     }
 
-    /* Stack: [..., local0, local1, ..., localN-1, body_result]
-     * We want: [..., body_result]
-     *
-     * SET_LOCAL overwrites first let-local with body_result (no pop).
-     * Then POP N times removes: body_result copy on top + N-1 remaining locals.
-     * Final stack: [..., body_result_in_first_slot]. */
-    int local_count_before = c->local_count;
-    c->scope_depth--;
-    while (c->local_count > 0 &&
-           c->locals[c->local_count - 1].depth > c->scope_depth) {
-        c->local_count--;
-    }
-    int locals_to_pop = local_count_before - c->local_count;
-    int first_let_slot = c->local_count;
-
-    /* Restore state so we can emit from the right local indices */
-    c->scope_depth++;
-    c->local_count = local_count_before;
-
-    if (locals_to_pop > 0) {
-        emit_bytes(c, OP_SET_LOCAL, (uint8_t)first_let_slot, line);
-
-        for (int i = c->local_count - 1; i >= first_let_slot; i--) {
-            if (c->locals[i].is_captured) {
-                emit_byte(c, OP_CLOSE_UPVALUE, line);
-            } else {
-                emit_byte(c, OP_POP, line);
-            }
-        }
-    }
-
-    c->scope_depth--;
-    c->local_count = first_let_slot;
+    end_scope_with_result(c, line);
 }
 
 static void compile_if(lisa_compiler *c, lisa_ast *node, bool tail) {
@@ -446,12 +472,24 @@ static void compile_if(lisa_compiler *c, lisa_ast *node, bool tail) {
 
 static void compile_do(lisa_compiler *c, lisa_ast *node, bool tail) {
     lisa_ast_list *exprs = &node->as.do_block.exprs;
+    int line = node->line;
+
+    begin_scope(c);
+    int first_local = c->local_count;
+
     for (int i = 0; i < exprs->count; i++) {
         bool is_last = (i == exprs->count - 1);
         compile_expr(c, exprs->items[i], is_last ? tail : false);
         if (!is_last) {
             emit_byte(c, OP_POP, exprs->items[i]->line);
         }
+    }
+
+    /* Only emit cleanup if locals were created in this scope */
+    if (c->local_count > first_local) {
+        end_scope_with_result(c, line);
+    } else {
+        c->scope_depth--;
     }
 }
 

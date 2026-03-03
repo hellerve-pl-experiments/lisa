@@ -704,6 +704,11 @@ lisa_interpret_result lisa_run(lisa_vm *vm, int base_frame) {
             pop(vm);
             break;
         }
+        case OP_CLOSE_UPVALUES_AT: {
+            uint8_t slot = READ_BYTE();
+            close_upvalues(vm, &frame->slots[slot]);
+            break;
+        }
 
         case OP_CONS: {
             lisa_value cdr = pop(vm);

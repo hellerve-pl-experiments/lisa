@@ -4,10 +4,6 @@
 ; from its input channel and forwards non-multiples
 ; to the next stage.
 ;
-; Important: inner recursive closures via `def` create globals
-; that get overwritten when multiple fibers run concurrently.
-; We avoid this by making helper functions directly recursive
-; with all state passed as parameters.
 
 (def gen-step (fn [ch limit i]
   (if (<= i limit)

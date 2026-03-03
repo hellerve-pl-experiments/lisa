@@ -43,7 +43,8 @@ typedef enum {
     OP_TAIL_CALL,     /* [argc]         tail call: reuse current frame */
     OP_RETURN,        /*                return top of stack */
 
-    OP_CLOSE_UPVALUE, /*                close upvalue at stack top */
+    OP_CLOSE_UPVALUE,    /*                close upvalue at stack top, pop */
+    OP_CLOSE_UPVALUES_AT,/* [slot]        close upvalues at slot and above (no pop) */
 
     OP_CONS,          /*                push cons(pop2, pop1) */
     OP_CAR,           /*                push car(pop) */

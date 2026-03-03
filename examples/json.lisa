@@ -119,14 +119,6 @@
 
 ; --- Parse object ---
 
-; Helper: key is a function parameter (local) so parse-value can't clobber it.
-(def obj-pair-step (fn [s key p3 acc]
-  (do
-    (def val-result (parse-value s (skip-ws s p3)))
-    (def p4 (skip-ws s (cdr val-result)))
-    (def p5 (if (= (char-at s p4) ",") (+ p4 1) p4))
-    (collect-object-pairs s p5 (cons (list key (car val-result)) acc)))))
-
 (def collect-object-pairs (fn [s pos acc]
   (do
     (def p (skip-ws s pos))
@@ -134,8 +126,13 @@
       (cons acc (+ p 1))
       (do
         (def key-result (parse-string s p))
+        (def key (car key-result))
         (def p2 (skip-ws s (cdr key-result)))
-        (obj-pair-step s (car key-result) (+ p2 1) acc))))))
+        (def val-result (parse-value s (skip-ws s (+ p2 1))))
+        (def val (car val-result))
+        (def p3 (skip-ws s (cdr val-result)))
+        (def p4 (if (= (char-at s p3) ",") (+ p3 1) p3))
+        (collect-object-pairs s p4 (cons (list key val) acc)))))))
 
 (def parse-object (fn [s pos]
   (do
