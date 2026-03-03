@@ -1,4 +1,5 @@
 #include "vm.h"
+#include "fiber.h"
 #include "jit.h"
 #include "compiler.h"
 #include "parser.h"
@@ -30,7 +31,7 @@ static lisa_value peek(lisa_vm *vm, int distance) {
 }
 
 static void reset_stack(lisa_vm *vm) {
-    vm->stack_top = vm->stack;
+    if (vm->stack) vm->stack_top = vm->stack;
     vm->frame_count = 0;
     vm->open_upvalues = NULL;
 }
@@ -118,14 +119,14 @@ static void define_native(lisa_vm *vm, const char *name, lisa_native_fn fn, int 
 }
 
 /* Built-in native functions for when operators are used as values */
-static lisa_value native_add(int argc, lisa_value *args) {
-    (void)argc;
+static lisa_value native_add(lisa_vm *vm_, int argc, lisa_value *args) {
+    (void)vm_; (void)argc;
     if (IS_INT(args[0]) && IS_INT(args[1])) return LISA_INT(AS_INT(args[0]) + AS_INT(args[1]));
     return lisa_double(lisa_as_number(args[0]) + lisa_as_number(args[1]));
 }
 
-static lisa_value native_sub(int argc, lisa_value *args) {
-    (void)argc;
+static lisa_value native_sub(lisa_vm *vm_, int argc, lisa_value *args) {
+    (void)vm_;
     if (argc == 1) {
         if (IS_INT(args[0])) return LISA_INT(-AS_INT(args[0]));
         return lisa_double(-AS_DOUBLE(args[0]));
@@ -134,15 +135,149 @@ static lisa_value native_sub(int argc, lisa_value *args) {
     return lisa_double(lisa_as_number(args[0]) - lisa_as_number(args[1]));
 }
 
-static lisa_value native_mul(int argc, lisa_value *args) {
-    (void)argc;
+static lisa_value native_mul(lisa_vm *vm_, int argc, lisa_value *args) {
+    (void)vm_; (void)argc;
     if (IS_INT(args[0]) && IS_INT(args[1])) return LISA_INT(AS_INT(args[0]) * AS_INT(args[1]));
     return lisa_double(lisa_as_number(args[0]) * lisa_as_number(args[1]));
 }
 
-static lisa_value native_div(int argc, lisa_value *args) {
-    (void)argc;
+static lisa_value native_div(lisa_vm *vm_, int argc, lisa_value *args) {
+    (void)vm_; (void)argc;
     return lisa_double(lisa_as_number(args[0]) / lisa_as_number(args[1]));
+}
+
+/* --- String/utility native functions --- */
+
+static lisa_value native_strlen(lisa_vm *vm, int argc, lisa_value *args) {
+    (void)vm; (void)argc;
+    if (!IS_STRING(args[0])) return LISA_NIL;
+    return LISA_INT(AS_STRING(args[0])->length);
+}
+
+static lisa_value native_char_at(lisa_vm *vm, int argc, lisa_value *args) {
+    (void)argc;
+    if (!IS_STRING(args[0]) || !IS_INT(args[1])) return LISA_NIL;
+    lisa_obj_string *s = AS_STRING(args[0]);
+    int64_t idx = AS_INT(args[1]);
+    if (idx < 0 || idx >= s->length) return LISA_NIL;
+    return LISA_OBJ(lisa_copy_string(&vm->gc, &s->chars[idx], 1));
+}
+
+static lisa_value native_substr(lisa_vm *vm, int argc, lisa_value *args) {
+    (void)argc;
+    if (!IS_STRING(args[0]) || !IS_INT(args[1]) || !IS_INT(args[2])) return LISA_NIL;
+    lisa_obj_string *s = AS_STRING(args[0]);
+    int64_t start = AS_INT(args[1]);
+    int64_t len = AS_INT(args[2]);
+    if (start < 0) start = 0;
+    if (start > s->length) start = s->length;
+    if (len < 0) len = 0;
+    if (start + len > s->length) len = s->length - start;
+    return LISA_OBJ(lisa_copy_string(&vm->gc, s->chars + start, (int)len));
+}
+
+static void stringify_value(lisa_value val, char *buf, int bufsize) {
+    if (IS_NIL(val)) {
+        snprintf(buf, (size_t)bufsize, "nil");
+    } else if (IS_BOOL(val)) {
+        snprintf(buf, (size_t)bufsize, "%s", AS_BOOL(val) ? "true" : "false");
+    } else if (IS_INT(val)) {
+        snprintf(buf, (size_t)bufsize, "%lld", (long long)AS_INT(val));
+    } else if (IS_DOUBLE(val)) {
+        snprintf(buf, (size_t)bufsize, "%g", AS_DOUBLE(val));
+    } else if (IS_STRING(val)) {
+        lisa_obj_string *s = AS_STRING(val);
+        int copy_len = s->length < bufsize - 1 ? s->length : bufsize - 1;
+        memcpy(buf, s->chars, (size_t)copy_len);
+        buf[copy_len] = '\0';
+    } else if (IS_OBJ(val)) {
+        switch (OBJ_TYPE(val)) {
+        case OBJ_LIST:     snprintf(buf, (size_t)bufsize, "<list>"); break;
+        case OBJ_CLOSURE:  snprintf(buf, (size_t)bufsize, "<fn>"); break;
+        case OBJ_FUNCTION: snprintf(buf, (size_t)bufsize, "<fn>"); break;
+        case OBJ_NATIVE:   snprintf(buf, (size_t)bufsize, "<native>"); break;
+        case OBJ_FIBER:    snprintf(buf, (size_t)bufsize, "<fiber>"); break;
+        case OBJ_CHANNEL:  snprintf(buf, (size_t)bufsize, "<channel>"); break;
+        default:           snprintf(buf, (size_t)bufsize, "<object>"); break;
+        }
+    } else {
+        snprintf(buf, (size_t)bufsize, "<unknown>");
+    }
+}
+
+static lisa_value native_str(lisa_vm *vm, int argc, lisa_value *args) {
+    if (argc == 0) return LISA_OBJ(lisa_copy_string(&vm->gc, "", 0));
+
+    /* Fast path: single string arg */
+    if (argc == 1 && IS_STRING(args[0])) return args[0];
+
+    char buf[256];
+    int total_len = 0;
+    char *result = malloc(1);
+    result[0] = '\0';
+
+    for (int i = 0; i < argc; i++) {
+        if (IS_STRING(args[i])) {
+            lisa_obj_string *s = AS_STRING(args[i]);
+            result = realloc(result, (size_t)(total_len + s->length + 1));
+            memcpy(result + total_len, s->chars, (size_t)s->length);
+            total_len += s->length;
+            result[total_len] = '\0';
+        } else {
+            stringify_value(args[i], buf, (int)sizeof(buf));
+            int slen = (int)strlen(buf);
+            result = realloc(result, (size_t)(total_len + slen + 1));
+            memcpy(result + total_len, buf, (size_t)slen);
+            total_len += slen;
+            result[total_len] = '\0';
+        }
+    }
+
+    lisa_obj_string *s = lisa_take_string(&vm->gc, result, total_len);
+    return LISA_OBJ(s);
+}
+
+static lisa_value native_parse_num(lisa_vm *vm, int argc, lisa_value *args) {
+    (void)vm; (void)argc;
+    if (!IS_STRING(args[0])) return LISA_NIL;
+    lisa_obj_string *s = AS_STRING(args[0]);
+    char *end;
+
+    long long ival = strtoll(s->chars, &end, 10);
+    if (end == s->chars + s->length && end != s->chars) {
+        return LISA_INT((int64_t)ival);
+    }
+
+    double dval = strtod(s->chars, &end);
+    if (end == s->chars + s->length && end != s->chars) {
+        return lisa_double(dval);
+    }
+
+    return LISA_NIL;
+}
+
+static lisa_value native_type(lisa_vm *vm, int argc, lisa_value *args) {
+    (void)argc;
+    const char *name;
+    if (IS_NIL(args[0]))          name = "nil";
+    else if (IS_BOOL(args[0]))    name = "bool";
+    else if (IS_INT(args[0]))     name = "int";
+    else if (IS_DOUBLE(args[0]))  name = "double";
+    else if (IS_STRING(args[0]))  name = "string";
+    else if (IS_OBJ(args[0])) {
+        switch (OBJ_TYPE(args[0])) {
+        case OBJ_LIST:     name = "list"; break;
+        case OBJ_CLOSURE:
+        case OBJ_FUNCTION: name = "fn"; break;
+        case OBJ_NATIVE:   name = "native"; break;
+        case OBJ_FIBER:    name = "fiber"; break;
+        case OBJ_CHANNEL:  name = "channel"; break;
+        default:           name = "object"; break;
+        }
+    } else {
+        name = "unknown";
+    }
+    return LISA_OBJ(lisa_copy_string(&vm->gc, name, (int)strlen(name)));
 }
 
 /* --- Upvalue management --- */
@@ -205,7 +340,7 @@ static bool call_closure(lisa_vm *vm, lisa_obj_closure *closure, int argc) {
     return true;
 }
 
-static bool call_value(lisa_vm *vm, lisa_value callee, int argc) {
+bool lisa_call_value(lisa_vm *vm, lisa_value callee, int argc) {
     if (IS_OBJ(callee)) {
         switch (OBJ_TYPE(callee)) {
         case OBJ_CLOSURE:
@@ -216,7 +351,7 @@ static bool call_value(lisa_vm *vm, lisa_value callee, int argc) {
                 runtime_error(vm, "Expected %d arguments but got %d.", native->arity, argc);
                 return false;
             }
-            lisa_value result = native->function(argc, vm->stack_top - argc);
+            lisa_value result = native->function(vm, argc, vm->stack_top - argc);
             vm->stack_top -= argc + 1;
             push(vm, result);
             return true;
@@ -467,7 +602,7 @@ lisa_interpret_result lisa_run(lisa_vm *vm, int base_frame) {
 
         case OP_CALL: {
             int argc = READ_BYTE();
-            if (!call_value(vm, peek(vm, argc), argc)) {
+            if (!lisa_call_value(vm, peek(vm, argc), argc)) {
                 return INTERPRET_RUNTIME_ERROR;
             }
             frame = &vm->frames[vm->frame_count - 1];
@@ -493,7 +628,7 @@ lisa_interpret_result lisa_run(lisa_vm *vm, int base_frame) {
 
             /* Native functions: no frame to reuse, fall through to normal call */
             if (IS_OBJ(callee) && OBJ_TYPE(callee) == OBJ_NATIVE) {
-                if (!call_value(vm, callee, argc)) {
+                if (!lisa_call_value(vm, callee, argc)) {
                     return INTERPRET_RUNTIME_ERROR;
                 }
                 frame = &vm->frames[vm->frame_count - 1];
@@ -657,7 +792,6 @@ lisa_interpret_result lisa_run(lisa_vm *vm, int base_frame) {
 /* --- Public API --- */
 
 void lisa_vm_init(lisa_vm *vm) {
-    reset_stack(vm);
     lisa_gc_init(&vm->gc);
     vm->global_names = NULL;
     vm->global_values = NULL;
@@ -665,14 +799,41 @@ void lisa_vm_init(lisa_vm *vm) {
     vm->global_capacity = 0;
     vm->jit_enabled = true;
 
+    /* Create main fiber */
+    vm->main_fiber = lisa_new_main_fiber(vm);
+    vm->current_fiber = vm->main_fiber;
+    vm->stack = vm->main_fiber->stack;
+    vm->stack_top = vm->main_fiber->stack;
+    vm->frames = vm->main_fiber->frames;
+    vm->frame_count = 0;
+    vm->open_upvalues = NULL;
+
+    lisa_sched_init(&vm->scheduler);
+
     /* Register native functions */
     define_native(vm, "+", native_add, 2);
     define_native(vm, "-", native_sub, -1);
     define_native(vm, "*", native_mul, 2);
     define_native(vm, "/", native_div, 2);
+
+    /* Fiber/channel native functions */
+    define_native(vm, "chan", native_chan, 0);
+    define_native(vm, "spawn", native_spawn, -1);
+    define_native(vm, "send", native_send, 2);
+    define_native(vm, "recv", native_recv, 1);
+    define_native(vm, "yield", native_yield, -1);
+
+    /* String/utility native functions */
+    define_native(vm, "strlen", native_strlen, 1);
+    define_native(vm, "char-at", native_char_at, 2);
+    define_native(vm, "substr", native_substr, 3);
+    define_native(vm, "str", native_str, -1);
+    define_native(vm, "parse-num", native_parse_num, 1);
+    define_native(vm, "type", native_type, 1);
 }
 
 void lisa_vm_free(lisa_vm *vm) {
+    lisa_sched_free(&vm->scheduler);
     free(vm->global_names);
     free(vm->global_values);
     lisa_gc_free(&vm->gc);
@@ -706,7 +867,14 @@ lisa_interpret_result lisa_interpret(lisa_vm *vm, const char *source) {
     push(vm, LISA_OBJ(closure));
     call_closure(vm, closure, 0);
 
-    return lisa_run(vm, 0);
+    lisa_interpret_result result = lisa_run(vm, 0);
+
+    /* Run any spawned fibers */
+    if (!lisa_sched_empty(&vm->scheduler)) {
+        lisa_run_scheduler(vm);
+    }
+
+    return result;
 }
 
 /* --- JIT helper functions --- */
@@ -725,7 +893,7 @@ static lisa_value jit_trampoline(lisa_vm *vm, lisa_value result) {
         lisa_value callee = vm->stack_top[-1 - argc];
 
         if (IS_OBJ(callee) && OBJ_TYPE(callee) == OBJ_NATIVE) {
-            call_value(vm, callee, argc);
+            lisa_call_value(vm, callee, argc);
             return vm->stack_top[-1];
         }
 
@@ -774,7 +942,7 @@ static lisa_value jit_trampoline(lisa_vm *vm, lisa_value result) {
 
 lisa_value lisa_jit_call_helper(lisa_vm *vm, int argc) {
     lisa_value callee = vm->stack_top[-1 - argc];
-    if (!call_value(vm, callee, argc)) {
+    if (!lisa_call_value(vm, callee, argc)) {
         return LISA_NIL; /* error already reported */
     }
     /* Check if callee was a native (call_value already handled it) */

@@ -1,0 +1,42 @@
+; Concurrent prime sieve (CSP-style, after Hoare / Go).
+;
+; Each prime gets its own fiber that filters multiples
+; from its input channel and forwards non-multiples
+; to the next stage.
+;
+; Important: inner recursive closures via `def` create globals
+; that get overwritten when multiple fibers run concurrently.
+; We avoid this by making helper functions directly recursive
+; with all state passed as parameters.
+
+(def gen-step (fn [ch limit i]
+  (if (<= i limit)
+    (do (send ch i) (gen-step ch limit (+ i 1)))
+    (send ch 0))))
+
+(def filter-step (fn [in out prime]
+  (def x (recv in))
+  (if (= x 0)
+    (send out 0)
+    (do
+      (if (= (% x prime) 0)
+        nil
+        (send out x))
+      (filter-step in out prime)))))
+
+(def spawn-filter (fn [in out prime]
+  (spawn (fn [] (filter-step in out prime)))))
+
+(def sieve (fn [ch]
+  (def p (recv ch))
+  (if (= p 0)
+    nil
+    (do
+      (println p)
+      (def nch (chan))
+      (spawn-filter ch nch p)
+      (sieve nch)))))
+
+(def source (chan))
+(spawn (fn [] (gen-step source 30 2)))
+(sieve source)

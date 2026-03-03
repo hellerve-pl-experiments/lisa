@@ -6,6 +6,11 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+/* Forward declarations (defined in vm.h / fiber.h) */
+typedef struct lisa_vm lisa_vm;
+typedef struct lisa_fiber lisa_fiber;
+typedef struct lisa_channel lisa_channel;
+
 typedef enum {
     OBJ_STRING,
     OBJ_FUNCTION,
@@ -13,6 +18,8 @@ typedef enum {
     OBJ_UPVALUE,
     OBJ_LIST,
     OBJ_NATIVE,
+    OBJ_FIBER,
+    OBJ_CHANNEL,
 } lisa_obj_type;
 
 struct lisa_obj {
@@ -58,7 +65,7 @@ typedef struct {
     lisa_value cdr;
 } lisa_obj_list;
 
-typedef lisa_value (*lisa_native_fn)(int argc, lisa_value *args);
+typedef lisa_value (*lisa_native_fn)(lisa_vm *vm, int argc, lisa_value *args);
 
 typedef struct {
     lisa_obj obj;
@@ -74,6 +81,8 @@ typedef struct {
 #define IS_CLOSURE(value)  (IS_OBJ(value) && OBJ_TYPE(value) == OBJ_CLOSURE)
 #define IS_NATIVE(value)   (IS_OBJ(value) && OBJ_TYPE(value) == OBJ_NATIVE)
 #define IS_LIST_OBJ(value) (IS_OBJ(value) && OBJ_TYPE(value) == OBJ_LIST)
+#define IS_FIBER(value)    (IS_OBJ(value) && OBJ_TYPE(value) == OBJ_FIBER)
+#define IS_CHANNEL(value)  (IS_OBJ(value) && OBJ_TYPE(value) == OBJ_CHANNEL)
 
 /* Cast macros */
 #define AS_STRING(value)   ((lisa_obj_string*)AS_OBJ(value))
@@ -83,6 +92,8 @@ typedef struct {
 #define AS_UPVALUE(value)  ((lisa_obj_upvalue*)AS_OBJ(value))
 #define AS_NATIVE(value)   ((lisa_obj_native*)AS_OBJ(value))
 #define AS_LIST(value)     ((lisa_obj_list*)AS_OBJ(value))
+#define AS_FIBER(value)    ((lisa_fiber*)AS_OBJ(value))
+#define AS_CHANNEL(value)  ((lisa_channel*)AS_OBJ(value))
 
 /* GC state */
 typedef struct {
@@ -96,6 +107,7 @@ typedef struct {
     lisa_value *stack;
     int stack_count;
     lisa_obj_upvalue *open_upvalues;
+    lisa_fiber *all_fibers;  /* linked list of all live fibers for GC */
 } lisa_gc;
 
 void lisa_gc_init(lisa_gc *gc);

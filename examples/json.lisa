@@ -1,0 +1,239 @@
+; JSON parser and printer in pure Lisa.
+;
+; Intermediate representation:
+;   JSON null   -> nil
+;   JSON bool   -> true / false
+;   JSON number -> int or double
+;   JSON string -> Lisa string
+;   JSON array  -> (list "arr" elem0 elem1 ...)
+;   JSON object -> (list "obj" (list key0 val0) (list key1 val1) ...)
+;
+; All parse-* functions take (str pos) and return (cons value new-pos).
+
+; --- Helpers ---
+
+(def skip-ws (fn [s pos]
+  (if (>= pos (strlen s)) pos
+    (do
+      (def c (char-at s pos))
+      (if (= c " ")  (skip-ws s (+ pos 1))
+      (if (= c "\n") (skip-ws s (+ pos 1))
+      (if (= c "\t") (skip-ws s (+ pos 1))
+      (if (= c "\r") (skip-ws s (+ pos 1))
+        pos))))))))
+
+; --- Parse string ---
+
+(def parse-string-chars (fn [s pos acc]
+  (if (>= pos (strlen s)) (cons acc pos)
+    (do
+      (def c (char-at s pos))
+      (if (= c "\"") (cons acc (+ pos 1))
+      (if (= c "\\")
+        (do
+          (def next (char-at s (+ pos 1)))
+          (if (= next "\"") (parse-string-chars s (+ pos 2) (str acc "\""))
+          (if (= next "\\") (parse-string-chars s (+ pos 2) (str acc "\\"))
+          (if (= next "n")  (parse-string-chars s (+ pos 2) (str acc "\n"))
+          (if (= next "t")  (parse-string-chars s (+ pos 2) (str acc "\t"))
+          (if (= next "/")  (parse-string-chars s (+ pos 2) (str acc "/"))
+            (parse-string-chars s (+ pos 2) (str acc next))))))))
+        (parse-string-chars s (+ pos 1) (str acc c))))))))
+
+(def parse-string (fn [s pos]
+  (parse-string-chars s (+ pos 1) "")))
+
+; --- Parse number ---
+
+(def is-num-char (fn [c]
+  (if (= c "0") true
+  (if (= c "1") true
+  (if (= c "2") true
+  (if (= c "3") true
+  (if (= c "4") true
+  (if (= c "5") true
+  (if (= c "6") true
+  (if (= c "7") true
+  (if (= c "8") true
+  (if (= c "9") true
+  (if (= c "-") true
+  (if (= c ".") true
+  (if (= c "e") true
+  (if (= c "E") true
+  (if (= c "+") true
+    false)))))))))))))))))
+
+(def collect-num-chars (fn [s pos]
+  (if (>= pos (strlen s)) pos
+    (if (is-num-char (char-at s pos))
+      (collect-num-chars s (+ pos 1))
+      pos))))
+
+(def parse-number (fn [s pos]
+  (do
+    (def end (collect-num-chars s pos))
+    (def numstr (substr s pos (- end pos)))
+    (cons (parse-num numstr) end))))
+
+; --- Parse keyword ---
+
+(def parse-keyword (fn [s pos]
+  (do
+    (def c (char-at s pos))
+    (if (= c "t")
+      (cons true (+ pos 4))
+    (if (= c "f")
+      (cons false (+ pos 5))
+    (if (= c "n")
+      (cons nil (+ pos 4))
+      (cons nil pos)))))))
+
+; --- Parse array ---
+
+(def collect-array-items (fn [s pos acc]
+  (do
+    (def p (skip-ws s pos))
+    (if (= (char-at s p) "]")
+      (cons acc (+ p 1))
+      (do
+        (def result (parse-value s p))
+        (def val (car result))
+        (def p2 (skip-ws s (cdr result)))
+        (def p3 (if (= (char-at s p2) ",") (+ p2 1) p2))
+        (collect-array-items s p3 (cons val acc)))))))
+
+(def reverse-onto (fn [lst acc]
+  (if (= (type lst) "list")
+    (reverse-onto (cdr lst) (cons (car lst) acc))
+    acc)))
+
+(def parse-array (fn [s pos]
+  (do
+    (def p (skip-ws s (+ pos 1)))
+    (if (= (char-at s p) "]")
+      (cons (list "arr") (+ p 1))
+      (do
+        (def result (collect-array-items s p nil))
+        (def items (reverse-onto (car result) nil))
+        (cons (cons "arr" items) (cdr result)))))))
+
+; --- Parse object ---
+
+; Helper: key is a function parameter (local) so parse-value can't clobber it.
+(def obj-pair-step (fn [s key p3 acc]
+  (do
+    (def val-result (parse-value s (skip-ws s p3)))
+    (def p4 (skip-ws s (cdr val-result)))
+    (def p5 (if (= (char-at s p4) ",") (+ p4 1) p4))
+    (collect-object-pairs s p5 (cons (list key (car val-result)) acc)))))
+
+(def collect-object-pairs (fn [s pos acc]
+  (do
+    (def p (skip-ws s pos))
+    (if (= (char-at s p) "}")
+      (cons acc (+ p 1))
+      (do
+        (def key-result (parse-string s p))
+        (def p2 (skip-ws s (cdr key-result)))
+        (obj-pair-step s (car key-result) (+ p2 1) acc))))))
+
+(def parse-object (fn [s pos]
+  (do
+    (def p (skip-ws s (+ pos 1)))
+    (if (= (char-at s p) "}")
+      (cons (list "obj") (+ p 1))
+      (do
+        (def result (collect-object-pairs s p nil))
+        (def pairs (reverse-onto (car result) nil))
+        (cons (cons "obj" pairs) (cdr result)))))))
+
+; --- Parse value (dispatcher) ---
+
+(def parse-value (fn [s pos]
+  (do
+    (def p (skip-ws s pos))
+    (def c (char-at s p))
+    (if (= c "\"") (parse-string s p)
+    (if (= c "{")  (parse-object s p)
+    (if (= c "[")  (parse-array s p)
+    (if (= c "t")  (parse-keyword s p)
+    (if (= c "f")  (parse-keyword s p)
+    (if (= c "n")  (parse-keyword s p)
+      (parse-number s p))))))))))
+
+(def json-parse (fn [s]
+  (car (parse-value s 0))))
+
+; --- Printer ---
+
+(def json-escape-chars (fn [s pos acc]
+  (if (>= pos (strlen s)) acc
+    (do
+      (def c (char-at s pos))
+      (if (= c "\\") (json-escape-chars s (+ pos 1) (str acc "\\\\"))
+      (if (= c "\"") (json-escape-chars s (+ pos 1) (str acc "\\\""))
+      (if (= c "\n") (json-escape-chars s (+ pos 1) (str acc "\\n"))
+      (if (= c "\t") (json-escape-chars s (+ pos 1) (str acc "\\t"))
+        (json-escape-chars s (+ pos 1) (str acc c))))))))))
+
+(def json-escape (fn [s]
+  (json-escape-chars s 0 "")))
+
+(def json-join (fn [lst sep first]
+  (if (= (type lst) "list")
+    (do
+      (def item (json-print (car lst)))
+      (def rest (cdr lst))
+      (if first
+        (str item (json-join rest sep false))
+        (str sep item (json-join rest sep false))))
+    "")))
+
+(def json-print-pair (fn [pair]
+  (str "\"" (json-escape (car pair)) "\":" (json-print (car (cdr pair))))))
+
+(def json-join-pairs (fn [lst sep first]
+  (if (= (type lst) "list")
+    (do
+      (def item (json-print-pair (car lst)))
+      (def rest (cdr lst))
+      (if first
+        (str item (json-join-pairs rest sep false))
+        (str sep item (json-join-pairs rest sep false))))
+    "")))
+
+(def json-print (fn [val]
+  (do
+    (def t (type val))
+    (if (= t "nil")    "null"
+    (if (= t "bool")   (if val "true" "false")
+    (if (= t "int")    (str val)
+    (if (= t "double") (str val)
+    (if (= t "string") (str "\"" (json-escape val) "\"")
+    (if (= t "list")
+      (do
+        (def tag (car val))
+        (def items (cdr val))
+        (if (= tag "arr")
+          (str "[" (json-join items "," true) "]")
+        (if (= tag "obj")
+          (str "{" (json-join-pairs items "," true) "}")
+          (str "\"" (json-escape (str val)) "\""))))
+      (str "\"" (json-escape (str val)) "\""))))))))))
+
+; --- Demo ---
+
+(def sample "{\"name\":\"Lisa\",\"version\":1,\"features\":[\"lists\",\"fibers\",true,null],\"nested\":{\"x\":3.14,\"y\":-42}}")
+
+(println "Input JSON:")
+(println sample)
+(println "")
+
+(def parsed (json-parse sample))
+(println "Parsed form:")
+(println parsed)
+(println "")
+
+(def output (json-print parsed))
+(println "Re-serialized:")
+(println output)

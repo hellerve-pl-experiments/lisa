@@ -1,0 +1,29 @@
+; Fan-out: spawn N workers that each compute fib(n),
+; collect all results through a shared channel.
+
+(def results (chan))
+
+(def fib (fn [n]
+  (if (<= n 1) n
+    (+ (fib (- n 1)) (fib (- n 2))))))
+
+; Helper that captures n in a closure
+(def spawn-one (fn [n]
+  (spawn (fn [] (send results (fib n))))))
+
+; Spawn 5 workers computing fib(15) through fib(19)
+(def spawn-workers (fn [i]
+  (if (<= i 19)
+    (do
+      (spawn-one i)
+      (spawn-workers (+ i 1))))))
+(spawn-workers 15)
+
+; Collect 5 results
+(def collect (fn [remaining acc]
+  (if (<= remaining 0) acc
+    (collect (- remaining 1) (+ acc (recv results))))))
+
+(def total (collect 5 0))
+(println total)
+; fib(15)+fib(16)+fib(17)+fib(18)+fib(19) = 610+987+1597+2584+4181 = 9959

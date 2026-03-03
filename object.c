@@ -1,4 +1,5 @@
 #include "object.h"
+#include "fiber.h"
 #include "jit.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -227,6 +228,12 @@ void lisa_print_object(FILE *f, lisa_value value) {
     case OBJ_NATIVE:
         fprintf(f, "<native %s>", AS_NATIVE(value)->name);
         break;
+    case OBJ_FIBER:
+        fprintf(f, "<fiber>");
+        break;
+    case OBJ_CHANNEL:
+        fprintf(f, "<channel>");
+        break;
     }
 }
 
@@ -274,11 +281,36 @@ static void mark_object(lisa_obj *obj) {
     }
     case OBJ_NATIVE:
         break;
+    case OBJ_FIBER: {
+        lisa_fiber *fiber = (lisa_fiber*)obj;
+        /* Mark fiber's stack values */
+        if (fiber->stack) {
+            for (lisa_value *slot = fiber->stack; slot < fiber->stack_top; slot++)
+                mark_value(*slot);
+        }
+        /* Mark fiber's open upvalues */
+        for (lisa_obj_upvalue *uv2 = fiber->open_upvalues; uv2; uv2 = uv2->next)
+            mark_object((lisa_obj*)uv2);
+        /* Mark frame closures */
+        for (int i = 0; i < fiber->frame_count; i++)
+            mark_object((lisa_obj*)fiber->frames[i].closure);
+        /* Mark entry closure */
+        if (fiber->entry) mark_object((lisa_obj*)fiber->entry);
+        mark_value(fiber->result);
+        break;
+    }
+    case OBJ_CHANNEL: {
+        lisa_channel *ch = (lisa_channel*)obj;
+        mark_value(ch->value);
+        if (ch->sender) mark_object((lisa_obj*)ch->sender);
+        if (ch->receiver) mark_object((lisa_obj*)ch->receiver);
+        break;
+    }
     }
 }
 
 static void mark_roots(lisa_gc *gc) {
-    /* Mark stack values */
+    /* Mark current stack values */
     for (int i = 0; i < gc->stack_count; i++) {
         mark_value(gc->stack[i]);
     }
@@ -287,6 +319,10 @@ static void mark_roots(lisa_gc *gc) {
     while (uv != NULL) {
         mark_object((lisa_obj*)uv);
         uv = uv->next;
+    }
+    /* Mark all live fibers (traverses each fiber's stack/frames/upvalues) */
+    for (lisa_fiber *f = gc->all_fibers; f != NULL; f = f->next_fiber) {
+        mark_object((lisa_obj*)f);
     }
 }
 
@@ -327,6 +363,17 @@ static void free_object(lisa_gc *gc, lisa_obj *obj) {
         gc->bytes_allocated -= sizeof(lisa_obj_native);
         free(obj);
         break;
+    case OBJ_FIBER: {
+        lisa_fiber *fiber = (lisa_fiber*)obj;
+        lisa_fiber_free_stacks(fiber);
+        gc->bytes_allocated -= sizeof(lisa_fiber);
+        free(obj);
+        break;
+    }
+    case OBJ_CHANNEL:
+        gc->bytes_allocated -= sizeof(lisa_channel);
+        free(obj);
+        break;
     }
 }
 
@@ -351,9 +398,22 @@ static void sweep(lisa_gc *gc) {
     }
 }
 
+static void rebuild_fiber_list(lisa_gc *gc) {
+    /* Rebuild the all_fibers linked list from surviving objects */
+    gc->all_fibers = NULL;
+    for (lisa_obj *obj = gc->objects; obj != NULL; obj = obj->next) {
+        if (obj->type == OBJ_FIBER) {
+            lisa_fiber *f = (lisa_fiber *)obj;
+            f->next_fiber = gc->all_fibers;
+            gc->all_fibers = f;
+        }
+    }
+}
+
 void lisa_gc_collect(lisa_gc *gc) {
     mark_roots(gc);
     sweep(gc);
+    rebuild_fiber_list(gc);
     gc->next_gc = gc->bytes_allocated * 2;
 }
 
@@ -367,6 +427,7 @@ void lisa_gc_init(lisa_gc *gc) {
     gc->stack = NULL;
     gc->stack_count = 0;
     gc->open_upvalues = NULL;
+    gc->all_fibers = NULL;
 }
 
 void lisa_gc_free(lisa_gc *gc) {

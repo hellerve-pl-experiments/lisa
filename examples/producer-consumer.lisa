@@ -1,0 +1,19 @@
+; A producer sends values 1..10 on a channel.
+; A consumer receives them and sums them up.
+
+(def ch (chan))
+
+(spawn (fn []
+  (def produce (fn [i]
+    (if (<= i 10)
+      (do
+        (send ch i)
+        (produce (+ i 1))))))
+  (produce 1)))
+
+(def consume (fn [n acc]
+  (if (<= n 0) acc
+    (consume (- n 1) (+ acc (recv ch))))))
+
+(println (consume 10 0))
+; => 55

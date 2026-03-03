@@ -1,0 +1,35 @@
+; Pipeline: chain three stages with channels.
+;   stage 1: generate numbers 1..5
+;   stage 2: square each number
+;   stage 3: print each result
+
+(def ch1 (chan))
+(def ch2 (chan))
+
+; Stage 1: producer
+(spawn (fn []
+  (def produce (fn [i]
+    (if (<= i 5)
+      (do (send ch1 i) (produce (+ i 1))))))
+  (produce 1)
+  (send ch1 0))) ; sentinel
+
+; Stage 2: squarer
+(spawn (fn []
+  (def square-loop (fn []
+    (def x (recv ch1))
+    (if (= x 0)
+      (send ch2 0)       ; forward sentinel
+      (do
+        (send ch2 (* x x))
+        (square-loop)))))
+  (square-loop)))
+
+; Stage 3: printer (runs on main fiber)
+(def print-loop (fn []
+  (def x (recv ch2))
+  (if (= x 0)
+    (println "done")
+    (do (println x) (print-loop)))))
+(print-loop)
+; => 1 4 9 16 25 done

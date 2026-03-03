@@ -3,22 +3,23 @@
 
 #include "value.h"
 #include "object.h"
+#include "fiber.h"
 #include "chunk.h"
 
 #define STACK_MAX 4096
 #define FRAMES_MAX 256
 
-typedef struct {
+typedef struct lisa_call_frame {
     lisa_obj_closure *closure;
     uint8_t *ip;
     lisa_value *slots; /* pointer into vm stack */
 } lisa_call_frame;
 
-typedef struct {
-    lisa_call_frame frames[FRAMES_MAX];
+struct lisa_vm {
+    lisa_call_frame *frames;  /* points to current_fiber->frames */
     int frame_count;
 
-    lisa_value stack[STACK_MAX];
+    lisa_value *stack;        /* points to current_fiber->stack */
     lisa_value *stack_top;
 
     /* Global variables: hash table of string -> value */
@@ -31,8 +32,13 @@ typedef struct {
 
     bool jit_enabled;
 
+    /* Fiber support */
+    lisa_fiber *current_fiber;
+    lisa_fiber *main_fiber;
+    lisa_scheduler scheduler;
+
     lisa_gc gc;
-} lisa_vm;
+};
 
 typedef enum {
     INTERPRET_OK,
@@ -47,6 +53,10 @@ lisa_interpret_result lisa_interpret(lisa_vm *vm, const char *source);
 /* Run the bytecode interpreter starting from the current top frame.
    Stops when frame_count drops to base_frame. */
 lisa_interpret_result lisa_run(lisa_vm *vm, int base_frame);
+
+/* Call a value (closure or native) with argc arguments on the stack.
+   Returns true on success; for closures, sets up the call frame (use lisa_run after). */
+bool lisa_call_value(lisa_vm *vm, lisa_value callee, int argc);
 
 /* JIT trampoline sentinel: top 16 bits = 0xDEAD (invalid as any lisa_value tag),
    low 8 bits = argc for the pending tail call. */
