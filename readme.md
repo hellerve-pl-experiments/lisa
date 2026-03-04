@@ -2,7 +2,9 @@
 
 wherein we vibe-code a jitted green-threaded lisp usng [cj](https://github.com/hellerve-pl-experiments/cj).
 
-no line outside of this readme was touched by a human.
+no line outside of this readme was touched by a human. read
+[docs/conversation.html](docs/conversation.html) if you want to see how the
+language was produced.
 
 ## usage
 
