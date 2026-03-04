@@ -775,14 +775,9 @@ lisa_interpret_result lisa_run(lisa_vm *vm, int base_frame) {
             vm->gc.stack_count = (int)(vm->stack_top - vm->stack);
             vm->gc.open_upvalues = vm->open_upvalues;
 
-            /* Also mark globals */
-            for (int i = 0; i < vm->global_capacity; i++) {
-                if (vm->global_names[i] != NULL) {
-                    /* Strings and values are reachable through the global table.
-                     * We need to mark them. For simplicity, we mark the entire
-                     * call stack's closures as roots. The gc.stack already covers values. */
-                }
-            }
+            vm->gc.global_names = vm->global_names;
+            vm->gc.global_values = vm->global_values;
+            vm->gc.global_capacity = vm->global_capacity;
 
             lisa_gc_collect(&vm->gc);
         }
@@ -888,6 +883,9 @@ static void sync_gc_roots(lisa_vm *vm) {
     vm->gc.stack = vm->stack;
     vm->gc.stack_count = (int)(vm->stack_top - vm->stack);
     vm->gc.open_upvalues = vm->open_upvalues;
+    vm->gc.global_names = vm->global_names;
+    vm->gc.global_values = vm->global_values;
+    vm->gc.global_capacity = vm->global_capacity;
 }
 
 /* Handle pending JIT tail calls iteratively (trampoline).
@@ -925,6 +923,11 @@ static lisa_value jit_trampoline(lisa_vm *vm, lisa_value result) {
         frame->closure = closure;
         frame->ip = closure->function->chunk.code;
 
+        if (vm->gc.bytes_allocated > vm->gc.next_gc) {
+            sync_gc_roots(vm);
+            lisa_gc_collect(&vm->gc);
+        }
+
         /* JIT-compile the target if needed */
         if (!closure->function->jit_code && vm->jit_enabled) {
             lisa_jit_compile(vm, closure->function);
@@ -952,6 +955,10 @@ lisa_value lisa_jit_call_helper(lisa_vm *vm, int argc) {
     }
     /* Check if callee was a native (call_value already handled it) */
     if (IS_OBJ(callee) && OBJ_TYPE(callee) == OBJ_NATIVE) {
+        if (vm->gc.bytes_allocated > vm->gc.next_gc) {
+            sync_gc_roots(vm);
+            lisa_gc_collect(&vm->gc);
+        }
         return vm->stack_top[-1]; /* result already on stack */
     }
     /* Closure call — dispatch to JIT or interpreter */

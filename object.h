@@ -108,6 +108,10 @@ typedef struct {
     int stack_count;
     lisa_obj_upvalue *open_upvalues;
     lisa_fiber *all_fibers;  /* linked list of all live fibers for GC */
+    /* Global variable table — set by the VM before collection */
+    lisa_obj_string **global_names;
+    lisa_value *global_values;
+    int global_capacity;
 } lisa_gc;
 
 void lisa_gc_init(lisa_gc *gc);

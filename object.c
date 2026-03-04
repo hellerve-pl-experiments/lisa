@@ -130,7 +130,9 @@ lisa_obj_string *lisa_take_string(lisa_gc *gc, char *chars, int length) {
         free(chars);
         return interned;
     }
-    return allocate_string(gc, chars, length, h);
+    lisa_obj_string *str = allocate_string(gc, chars, length, h);
+    free(chars);
+    return str;
 }
 
 /* --- Object creation --- */
@@ -324,6 +326,13 @@ static void mark_roots(lisa_gc *gc) {
     for (lisa_fiber *f = gc->all_fibers; f != NULL; f = f->next_fiber) {
         mark_object((lisa_obj*)f);
     }
+    /* Mark global variable names and values */
+    for (int i = 0; i < gc->global_capacity; i++) {
+        if (gc->global_names[i] != NULL) {
+            mark_object((lisa_obj*)gc->global_names[i]);
+            mark_value(gc->global_values[i]);
+        }
+    }
 }
 
 static void free_object(lisa_gc *gc, lisa_obj *obj) {
@@ -428,6 +437,9 @@ void lisa_gc_init(lisa_gc *gc) {
     gc->stack_count = 0;
     gc->open_upvalues = NULL;
     gc->all_fibers = NULL;
+    gc->global_names = NULL;
+    gc->global_values = NULL;
+    gc->global_capacity = 0;
 }
 
 void lisa_gc_free(lisa_gc *gc) {
